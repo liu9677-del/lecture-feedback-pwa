@@ -1,0 +1,14 @@
+{
+  "name": "演講評論助手",
+  "short_name": "演講評論",
+  "description": "錄音演講後自動轉錄並比對您的文獻庫，產出附引用的評論報告",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2b5797",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
