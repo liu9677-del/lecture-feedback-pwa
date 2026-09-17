@@ -1,6 +1,6 @@
 // ===== 設定區：填入您自己的值 =====
 const CONFIG = {
-  GOOGLE_CLIENT_ID: '268559654361-dkc7pshurgb6l8i6ms5nckqgl4dhet2r.apps.googleusercontent.com',
+  GOOGLE_CLIENT_ID: '268559654361-dkc7pshurgb6l8i6ms5nckqgl4dhet2r.apps.googleusercontent.com'.        
   GEMINI_MODEL: 'gemini-3.6-flash',
 };
 // ===================================
