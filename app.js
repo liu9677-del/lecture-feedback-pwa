@@ -11,7 +11,7 @@ let driveAccessToken = null;
 let jobCounter = 0;
 
 const statusEl = document.getElementById('status');
-const reportsEl = document.getElementById('reports'); // 改為多筆報告容器
+const reportsEl = document.getElementById('reports');
 const recordBtn = document.getElementById('recordBtn');
 const uploadBtn = document.getElementById('uploadBtn');
 const fileInput = document.getElementById('fileInput');
@@ -28,7 +28,7 @@ function log(msg) {
   statusEl.textContent += msg + '\n';
 }
 
-// ---------- 錄音：錄完立刻可以錄下一場，不用等分析 ----------
+// ---------- 錄音 ----------
 recordBtn.addEventListener('click', async () => {
   if (mediaRecorder && mediaRecorder.state === 'recording') {
     mediaRecorder.stop();
@@ -51,7 +51,6 @@ recordBtn.addEventListener('click', async () => {
   log('錄音中...');
 });
 
-// ---------- 上傳檔案：一樣立刻進佇列，不卡住介面 ----------
 uploadBtn.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', () => {
   if (fileInput.files.length > 0) {
@@ -83,7 +82,7 @@ driveAuthBtn.addEventListener('click', () => {
   if (tokenClient) tokenClient.requestAccessToken();
 });
 
-// ---------- Gemini 呼叫 ----------
+// ---------- Gemini 呼叫（支援文字 + 檔案混合輸入） ----------
 function apiKey() {
   const key = geminiKeyInput.value.trim();
   if (!key) throw new Error('請先在下方填入 Gemini API Key');
@@ -124,7 +123,7 @@ async function extractClaims(transcript) {
   const text = await callGemini([
     {
       text: `你是一位醫學研究助理。請閱讀以下演講逐字稿，萃取出講者提出的「核心論點」與「引用的關鍵數據/研究」，最多列出 8 點。
-針對 search_keywords，請同時提供中文與英文兩種關鍵字（各1-2個），因為文獻庫可能是英文檔名或內容。
+針對 search_keywords，請同時提供中文與英文兩種關鍵字（各1-2個）。
 只輸出 JSON 陣列，格式為：
 [{"claim": "論點摘要", "detail": "相關細節或數字", "search_keywords": ["中文關鍵字", "English keyword"]}]
 不要輸出其他文字。
@@ -137,32 +136,42 @@ ${transcript}`,
   return JSON.parse(cleaned);
 }
 
-async function compareClaimWithLiterature(claim, literature) {
-  const literatureText = literature
-    .map((f, i) => `[文獻${i + 1}] ${f.title}\n片段：${f.snippet}`)
-    .join('\n\n');
-  return callGemini([
+// ---------- 比對：PDF 直接以原生檔案格式交給 Gemini 讀取 ----------
+async function compareClaimWithLiterature(claim, literatureFiles) {
+  const parts = [
     {
       text: `你是一位資深醫學研究者，正在幫使用者針對演講內容做文獻查核與評論。
 
 演講論點：${claim.claim}
 細節：${claim.detail}
 
-使用者雲端硬碟中搜尋到的相關文獻：
-${literatureText || '（未搜尋到相關文獻）'}
+以下附上使用者雲端硬碟中搜尋到的相關文獻全文檔案（依序編號為[文獻1]、[文獻2]...），請實際閱讀檔案內容（不是只看檔名），判斷是否支持、有疑慮、或可補充演講中的論點。
 
-請針對這個論點給出簡短評論（3-5句），需包含：
-1. 是否有文獻支持、有疑慮、或可補充最新資訊
-2. 明確標註根據哪一篇文獻（用[文獻N]標示）
-3. 若無對應文獻，請如實說明「文庫中無直接對應文獻」，並改為根據你自己的醫學知識給出一般性評論，不要留白
+請給出簡短評論（3-5句），需包含：
+1. 根據實際讀到的文獻內容，是否支持、有疑慮、或可補充演講論點
+2. 明確標註根據哪一篇文獻（用[文獻N]標示），並簡述該文獻具體說了什麼（不要只講標題）
+3. 若附件文獻與論點無直接關聯，或無附件文獻，請如實說明「文庫中無直接對應文獻」，並改為根據你自己的醫學知識給出一般性評論
 
 只輸出評論文字。`,
     },
-  ]);
+  ];
+
+  if (literatureFiles.length === 0) {
+    parts[0].text = parts[0].text.replace('以下附上使用者雲端硬碟中搜尋到的相關文獻全文檔案', '（本次未搜尋到相關文獻檔案）');
+  } else {
+    literatureFiles.forEach((f, i) => {
+      parts.push({ text: `\n[文獻${i + 1}] 檔名：${f.title}` });
+      if (f.base64 && f.mimeType) {
+        parts.push({ inline_data: { mime_type: f.mimeType, data: f.base64 } });
+      }
+    });
+  }
+
+  return callGemini(parts);
 }
 
-// ---------- Google Drive 搜尋：中英文關鍵字都搜 ----------
-async function searchLiterature(keywords, maxResults = 5) {
+// ---------- Google Drive 搜尋：抓檔案原始 bytes（含PDF），供 Gemini 原生讀取 ----------
+async function searchLiterature(keywords, maxResults = 4) {
   if (!driveAccessToken) return [];
   const q = keywords.map((k) => `fullText contains '${k.replace(/'/g, "\\'")}'`).join(' or ');
   const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&pageSize=${maxResults}&fields=files(id,name,mimeType)`;
@@ -174,20 +183,34 @@ async function searchLiterature(keywords, maxResults = 5) {
   const results = [];
   for (const file of files) {
     try {
-      const contentRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`,
-        { headers: { Authorization: `Bearer ${driveAccessToken}` } }
-      );
-      const text = contentRes.ok ? await contentRes.text() : '';
-      results.push({ title: file.name, snippet: text.slice(0, 800) });
+      const isGoogleNative = file.mimeType && file.mimeType.startsWith('application/vnd.google-apps');
+      const fetchUrl = isGoogleNative
+        ? `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=text/plain`
+        : `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`;
+
+      const contentRes = await fetch(fetchUrl, { headers: { Authorization: `Bearer ${driveAccessToken}` } });
+      if (!contentRes.ok) {
+        results.push({ title: file.name, mimeType: null, base64: null });
+        continue;
+      }
+
+      const blob = await contentRes.blob();
+      const base64 = await blobToBase64(blob);
+      const mimeType = isGoogleNative ? 'text/plain' : (file.mimeType || 'application/octet-stream');
+
+      if (base64.length > 15000000) {
+        results.push({ title: file.name, mimeType: null, base64: null });
+      } else {
+        results.push({ title: file.name, mimeType, base64 });
+      }
     } catch (e) {
-      results.push({ title: file.name, snippet: '（無法讀取內容）' });
+      results.push({ title: file.name, mimeType: null, base64: null });
     }
   }
   return results;
 }
 
-// ---------- 佇列系統：每場演講各自跑，互不卡住 ----------
+// ---------- 佇列系統 ----------
 const jobQueue = [];
 let isProcessing = false;
 
@@ -195,7 +218,7 @@ function queueAnalysis(blob, label) {
   jobCounter++;
   const jobId = jobCounter;
   const card = createReportCard(jobId, label);
-  reportsEl.prepend(card); // 新的放最上面
+  reportsEl.prepend(card);
   jobQueue.push({ jobId, blob, label });
   log(`已加入分析佇列：${label}（目前排隊 ${jobQueue.length} 筆）`);
   processQueue();
@@ -237,9 +260,12 @@ async function runOneAnalysis({ jobId, blob, label }) {
     let md = '';
     for (let i = 0; i < claims.length; i++) {
       const claim = claims[i];
-      updateCard(jobId, `🔄 ${label}｜比對第 ${i + 1}/${claims.length} 個論點`);
+      updateCard(jobId, `🔄 ${label}｜搜尋第 ${i + 1}/${claims.length} 個論點的文獻`);
       const literature = await searchLiterature(claim.search_keywords || [claim.claim]);
+
+      updateCard(jobId, `🔄 ${label}｜Gemini 正在閱讀文獻並比對第 ${i + 1}/${claims.length} 個論點`);
       const comment = await compareClaimWithLiterature(claim, literature);
+
       md += `【${i + 1}】${claim.claim}\n細節：${claim.detail}\n意見：${comment}\n`;
       if (literature.length) md += `參考文獻：${literature.map((l) => l.title).join('、')}\n`;
       md += '\n';
