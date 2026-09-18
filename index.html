@@ -11,16 +11,14 @@
 </head>
 <body>
   <h1>🎙 演講評論助手</h1>
-  <p>錄音演講或上傳音檔，自動轉錄並比對您的 Google Drive 文獻庫。</p>
+  <p>錄完一場立刻可以錄下一場，分析會在背景排隊處理，完成後顯示在下方。</p>
 
   <button id="recordBtn">開始錄音</button>
   <button id="uploadBtn">或上傳音檔</button>
   <input type="file" id="fileInput" accept="audio/*" style="display:none" />
 
-  <button id="runBtn" disabled>開始分析</button>
-
   <div id="status"></div>
-  <div id="report"></div>
+  <div id="reports"></div>
 
   <div class="settings">
     <label>Gemini API Key</label>
