@@ -179,6 +179,7 @@ async function searchLiterature(keywords, maxResults = 4) {
   if (!res.ok) return [];
   const data = await res.json();
   const files = data.files || [];
+  log(`Drive搜尋到 ${files.length} 篇檔案：${files.map(f => f.name + '(' + (f.mimeType||'?') + ')').join('、') || '（無）'}`);
 
   const results = [];
   for (const file of files) {
@@ -190,20 +191,33 @@ async function searchLiterature(keywords, maxResults = 4) {
 
       const contentRes = await fetch(fetchUrl, { headers: { Authorization: `Bearer ${driveAccessToken}` } });
       if (!contentRes.ok) {
+        log(`  ✗ ${file.name}｜下載失敗，HTTP狀態碼：${contentRes.status}`);
         results.push({ title: file.name, mimeType: null, base64: null });
         continue;
       }
 
       const blob = await contentRes.blob();
       const base64 = await blobToBase64(blob);
-      const mimeType = isGoogleNative ? 'text/plain' : (file.mimeType || 'application/octet-stream');
+      // 不管 Drive 回報的類型是什麼，只要副檔名是 .pdf 就強制當作 application/pdf
+      // 因為手機上傳時 Drive 有時會把 PDF 誤判為 application/octet-stream，導致 Gemini 無法正確解析
+      let mimeType;
+      if (isGoogleNative) {
+        mimeType = 'text/plain';
+      } else if (/\.pdf$/i.test(file.name)) {
+        mimeType = 'application/pdf';
+      } else {
+        mimeType = file.mimeType || 'application/octet-stream';
+      }
 
       if (base64.length > 15000000) {
+        log(`  ⚠️ ${file.name} 檔案過大（${(base64.length/1000000).toFixed(1)}MB），略過內文，僅供標題參考`);
         results.push({ title: file.name, mimeType: null, base64: null });
       } else {
+        log(`  ✓ ${file.name}｜類型：${mimeType}｜大小：${(base64.length/1000).toFixed(0)}KB`);
         results.push({ title: file.name, mimeType, base64 });
       }
     } catch (e) {
+      log(`  ✗ ${file.name}｜讀取失敗：${e.message}`);
       results.push({ title: file.name, mimeType: null, base64: null });
     }
   }
