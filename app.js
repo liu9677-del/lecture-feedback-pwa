@@ -13,6 +13,7 @@ let jobCounter = 0;
 const statusEl = document.getElementById('status');
 const reportsEl = document.getElementById('reports');
 const recordBtn = document.getElementById('recordBtn');
+const clearBtn = document.getElementById('clearBtn');
 const uploadBtn = document.getElementById('uploadBtn');
 const fileInput = document.getElementById('fileInput');
 const geminiKeyInput = document.getElementById('geminiKey');
@@ -58,6 +59,18 @@ fileInput.addEventListener('change', () => {
     queueAnalysis(file, file.name);
     fileInput.value = '';
   }
+});
+
+// ---------- 清除全部暫存記錄 ----------
+clearBtn.addEventListener('click', () => {
+  const pending = jobQueue.length + (isProcessing ? 1 : 0);
+  const warnMsg = pending > 0
+    ? `目前還有 ${pending} 筆正在處理中，清除畫面不會中斷背景分析，但結果跑完後會找不到對應卡片顯示。確定要清除嗎？`
+    : '確定要清除目前畫面上所有的逐字稿與報告記錄嗎？此動作無法復原。';
+  if (!confirm(warnMsg)) return;
+  reportsEl.innerHTML = '';
+  statusEl.textContent = '';
+  log('已清除畫面上的暫存記錄。');
 });
 
 // ---------- Google Drive 授權 ----------
@@ -265,6 +278,21 @@ function updateCard(jobId, headerText, bodyHtml) {
   if (bodyHtml !== undefined) card.querySelector('.report-body').textContent = bodyHtml;
 }
 
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// 把逐字稿（預設摺疊，不佔版面）+ 分析結果，一起塞進卡片的 body
+function setCardBodyWithTranscript(jobId, transcript, analysisText) {
+  const card = document.getElementById(`report-${jobId}`);
+  if (!card) return;
+  const body = card.querySelector('.report-body');
+  const transcriptHtml = transcript
+    ? `<details style="margin-bottom:10px;"><summary style="cursor:pointer;color:#2b5797;">📝 查看逐字稿（點擊展開，共${transcript.length}字，供核對用）</summary><div style="white-space:pre-wrap;font-size:12.5px;color:#555;margin-top:8px;max-height:300px;overflow-y:auto;border:1px solid #eee;border-radius:6px;padding:8px;">${escapeHtml(transcript)}</div></details>`
+    : '';
+  body.innerHTML = transcriptHtml + `<div style="white-space:pre-wrap;">${escapeHtml(analysisText)}</div>`;
+}
+
 async function processQueue() {
   if (isProcessing) return;
   isProcessing = true;
@@ -276,9 +304,11 @@ async function processQueue() {
 }
 
 async function runOneAnalysis({ jobId, blob, label }) {
+  let transcript = '';
   try {
     updateCard(jobId, `🔄 ${label}｜正在轉錄音訊...`);
-    const transcript = await transcribeAudio(blob);
+    transcript = await transcribeAudio(blob);
+    log(`📝 ${label}｜轉錄預覽（前80字）：${transcript.slice(0, 80)}...`);
 
     updateCard(jobId, `🔄 ${label}｜正在萃取核心論點...`);
     const claims = await extractClaims(transcript);
@@ -288,17 +318,30 @@ async function runOneAnalysis({ jobId, blob, label }) {
       const claim = claims[i];
       updateCard(jobId, `🔄 ${label}｜搜尋第 ${i + 1}/${claims.length} 個論點的文獻`);
       const literature = await searchLiterature(claim.search_keywords || [claim.claim]);
+      const literatureNames = literature.map((l) => `${l.title}${l.base64 ? '(已附檔案)' : '(僅標題,未附檔案)'}`).join('、');
 
       updateCard(jobId, `🔄 ${label}｜Gemini 正在閱讀文獻並比對第 ${i + 1}/${claims.length} 個論點`);
-      const comment = await compareClaimWithLiterature(claim, literature);
+
+      let comment;
+      try {
+        comment = await compareClaimWithLiterature(claim, literature);
+      } catch (claimErr) {
+        log(`❌ 第${i + 1}個論點失敗｜論點：${claim.claim}`);
+        log(`   送出的文獻：${literatureNames || '（無）'}`);
+        log(`   錯誤訊息：${claimErr.message}`);
+        comment = `（此論點分析失敗，已跳過，詳見上方狀態區的錯誤紀錄。錯誤訊息：${claimErr.message}）`;
+      }
 
       md += `【${i + 1}】${claim.claim}\n細節：${claim.detail}\n意見：${comment}\n`;
-      if (literature.length) md += `參考文獻：${literature.map((l) => l.title).join('、')}\n`;
+      if (literature.length) md += `參考文獻：${literatureNames}\n`;
       md += '\n';
     }
 
-    updateCard(jobId, `✅ ${label}｜完成`, md);
+    updateCard(jobId, `✅ ${label}｜完成`);
+    setCardBodyWithTranscript(jobId, transcript, md);
   } catch (err) {
-    updateCard(jobId, `❌ ${label}｜錯誤：${err.message}`, '');
+    log(`❌ ${label} 整場分析失敗｜錯誤訊息：${err.message}`);
+    updateCard(jobId, `❌ ${label}｜錯誤：${err.message}`);
+    if (transcript) setCardBodyWithTranscript(jobId, transcript, '（此場後續分析失敗，但轉錄已完成，可展開下方逐字稿查看）');
   }
 }
