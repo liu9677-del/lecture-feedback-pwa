@@ -11,7 +11,7 @@
 </head>
 <body>
   <h1>🎙 演講評論助手</h1>
-  <p>錄完一場立刻可以錄下一場，分析會在背景排隊處理，完成後顯示在下方。</p>
+  <p>錄完一場立刻可以錄下一場。上傳後即可離開頁面，分析會在 Google 背景伺服器完成，報告自動存到您 Drive 的「演講評論報告」資料夾。</p>
 
   <button id="recordBtn">開始錄音</button>
   <button id="uploadBtn">或上傳音檔</button>
@@ -22,15 +22,6 @@
   <div id="status"></div>
   <div id="reports"></div>
 
-  <div class="settings">
-    <label>Gemini API Key</label>
-    <input type="password" id="geminiKey" placeholder="貼上您的 Gemini API Key" />
-    <label>Google Drive 授權</label>
-    <button id="driveAuthBtn" style="background:#eee;color:#222;">連接 Google Drive</button>
-    <div id="driveStatus" style="font-size:12px;color:#888;"></div>
-  </div>
-
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script src="app.js"></script>
 </body>
 </html>
