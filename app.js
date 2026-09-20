@@ -72,42 +72,81 @@ clearBtn.addEventListener('click', () => {
 // ---------- 上傳到 Apps Script，背景處理，不阻塞介面 ----------
 async function submitToBackground(blob, mimeType, label) {
   jobCounter++;
-  const jobId = jobCounter;
-  const card = createReportCard(jobId, label);
+  const cardKey = jobCounter;
+  const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const card = createReportCard(cardKey, label);
   reportsEl.prepend(card);
-  updateCard(jobId, `⏳ ${label}｜正在上傳音檔到背景伺服器...`);
+  updateCard(cardKey, `⏳ ${label}｜正在上傳音檔到背景伺服器...`);
 
   try {
     const base64 = await blobToBase64(blob);
     log(`📤 ${label}｜開始上傳（音檔大小約 ${(base64.length / 1000).toFixed(0)}KB）`);
 
-    updateCard(jobId, `🔄 ${label}｜已上傳，伺服器正在背景處理中（此時您可以離開此頁面，處理完成後報告會存到您的 Google Drive「演講評論報告」資料夾）`);
-
-    const res = await fetch(CONFIG.APPS_SCRIPT_URL, {
+    // 用 no-cors 模式「送出」：這個方向的請求本來就穩定，只是讀不到回應，改用no-cors不理會回應即可。
+    await fetch(CONFIG.APPS_SCRIPT_URL, {
       method: 'POST',
-      body: JSON.stringify({ audioBase64: base64, mimeType, label }),
+      mode: 'no-cors',
+      body: JSON.stringify({ audioBase64: base64, mimeType, label, jobId }),
     });
 
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || '未知錯誤');
-
-    log(`✅ ${label}｜背景處理完成！`);
-    updateCard(jobId, `✅ ${label}｜完成`, `報告已存到您的 Google Drive「演講評論報告」資料夾。\n\n點此開啟：${data.docUrl}`);
-
-    const card2 = document.getElementById(`report-${jobId}`);
-    if (card2) {
-      const body = card2.querySelector('.report-body');
-      const link = document.createElement('a');
-      link.href = data.docUrl;
-      link.target = '_blank';
-      link.textContent = '📄 開啟報告文件';
-      link.style.cssText = 'display:inline-block;margin-top:8px;color:#2b5797;font-weight:600;';
-      body.appendChild(link);
-    }
+    updateCard(cardKey, `🔄 ${label}｜已送出，伺服器背景處理中，正在查詢進度...`);
+    log(`📤 ${label}｜已送出，開始查詢處理進度（可安心離開此頁面，回來時進度會遺失但伺服器仍會繼續處理，請直接看Drive）`);
+    pollJobStatus(jobId, cardKey, label, 0);
   } catch (err) {
-    log(`❌ ${label}｜錯誤：${err.message}`);
-    updateCard(jobId, `❌ ${label}｜錯誤：${err.message}`);
+    log(`❌ ${label}｜上傳失敗：${err.message}`);
+    updateCard(cardKey, `❌ ${label}｜上傳失敗：${err.message}`);
   }
+}
+
+// ---------- JSONP 輪詢：用 <script> 標籤查詢進度，完全不受 CORS 限制影響 ----------
+function pollJobStatus(jobId, cardKey, label, attempt) {
+  const MAX_ATTEMPTS = 60; // 每8秒查一次，最多查約8分鐘
+  if (attempt >= MAX_ATTEMPTS) {
+    updateCard(cardKey, `⚠️ ${label}｜查詢逾時`, `伺服器可能仍在處理，或查詢遇到問題。請直接至 Google Drive「演講評論報告」資料夾查看是否已產生報告。`);
+    return;
+  }
+
+  const callbackName = `jobCb_${jobId.replace(/[^a-zA-Z0-9]/g, '')}`;
+  const script = document.createElement('script');
+
+  const cleanup = () => {
+    delete window[callbackName];
+    if (script.parentNode) script.parentNode.removeChild(script);
+  };
+
+  window[callbackName] = (data) => {
+    cleanup();
+    if (data.status === 'done') {
+      log(`✅ ${label}｜背景處理完成！`);
+      updateCard(cardKey, `✅ ${label}｜完成`, `報告已存到您的 Google Drive「演講評論報告」資料夾。`);
+      const cardEl = document.getElementById(`report-${cardKey}`);
+      if (cardEl) {
+        const body = cardEl.querySelector('.report-body');
+        const link = document.createElement('a');
+        link.href = data.docUrl;
+        link.target = '_blank';
+        link.textContent = '📄 開啟報告文件';
+        link.style.cssText = 'display:inline-block;margin-top:8px;color:#2b5797;font-weight:600;';
+        body.appendChild(link);
+      }
+    } else if (data.status === 'error') {
+      log(`❌ ${label}｜背景處理失敗：${data.message}`);
+      updateCard(cardKey, `❌ ${label}｜處理失敗`, data.message || '未知錯誤');
+    } else {
+      // pending 或 processing，繼續等待後再查一次
+      updateCard(cardKey, `🔄 ${label}｜伺服器處理中...（已查詢 ${attempt + 1} 次）`);
+      setTimeout(() => pollJobStatus(jobId, cardKey, label, attempt + 1), 8000);
+    }
+  };
+
+  script.onerror = () => {
+    cleanup();
+    // 查詢本身失敗（少見），稍後重試，不影響伺服器端實際處理
+    setTimeout(() => pollJobStatus(jobId, cardKey, label, attempt + 1), 8000);
+  };
+
+  script.src = `${CONFIG.APPS_SCRIPT_URL}?jobId=${encodeURIComponent(jobId)}&callback=${callbackName}`;
+  document.body.appendChild(script);
 }
 
 function createReportCard(jobId, label) {
