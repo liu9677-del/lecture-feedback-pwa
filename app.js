@@ -184,9 +184,26 @@ async function compareClaimWithLiterature(claim, literatureFiles) {
   if (literatureFiles.length === 0) {
     parts[0].text = parts[0].text.replace('以下附上使用者雲端硬碟中搜尋到的相關文獻全文檔案', '（本次未搜尋到相關文獻檔案）');
   } else {
+    // 整批文獻總量控管：Gemini單次請求建議控制在約18MB內，優先讓大檔案（通常內容較完整的大型論文）能附上內文，
+    // 超出預算時犧牲較小的檔案，改為僅附標題（避免因單篇超大檔案，拖累整批全部讀不到內容）
+    const TOTAL_BUDGET = 18000000;
+    const withSize = literatureFiles.map((f) => ({ ...f, _size: f.base64 ? f.base64.length : 0 }));
+    const bySize = [...withSize].sort((a, b) => b._size - a._size);
+    let runningTotal = 0;
+    const allowSet = new Set();
+    for (const f of bySize) {
+      if (f._size === 0) continue; // 本來就沒抓到內容的，不佔預算
+      if (runningTotal + f._size <= TOTAL_BUDGET) {
+        runningTotal += f._size;
+        allowSet.add(f.title);
+      } else {
+        log(`  ⚠️ 本次請求已達文獻總量上限，「${f.title}」改為僅供標題參考（未附全文）`);
+      }
+    }
+
     literatureFiles.forEach((f, i) => {
       parts.push({ text: `\n[文獻${i + 1}] 檔名：${f.title}` });
-      if (f.base64 && f.mimeType) {
+      if (f.base64 && f.mimeType && allowSet.has(f.title)) {
         parts.push({ inline_data: { mime_type: f.mimeType, data: f.base64 } });
       }
     });
@@ -210,8 +227,12 @@ async function searchLiterature(keywords, maxResults = 4) {
   for (const file of files) {
     try {
       const isGoogleNative = file.mimeType && file.mimeType.startsWith('application/vnd.google-apps');
+      // 不同 Google 原生類型要匯出成不同格式：試算表用 CSV，文件/簡報用純文字
+      let exportMimeType = 'text/plain';
+      if (file.mimeType === 'application/vnd.google-apps.spreadsheet') exportMimeType = 'text/csv';
+
       const fetchUrl = isGoogleNative
-        ? `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=text/plain`
+        ? `https://www.googleapis.com/drive/v3/files/${file.id}/export?mimeType=${encodeURIComponent(exportMimeType)}`
         : `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`;
 
       const contentRes = await fetch(fetchUrl, { headers: { Authorization: `Bearer ${driveAccessToken}` } });
@@ -227,15 +248,18 @@ async function searchLiterature(keywords, maxResults = 4) {
       // 因為手機上傳時 Drive 有時會把 PDF 誤判為 application/octet-stream，導致 Gemini 無法正確解析
       let mimeType;
       if (isGoogleNative) {
-        mimeType = 'text/plain';
+        mimeType = exportMimeType;
       } else if (/\.pdf$/i.test(file.name)) {
         mimeType = 'application/pdf';
+
       } else {
         mimeType = file.mimeType || 'application/octet-stream';
       }
 
-      if (base64.length > 15000000) {
-        log(`  ⚠️ ${file.name} 檔案過大（${(base64.length/1000000).toFixed(1)}MB），略過內文，僅供標題參考`);
+      // 單檔上限抓在 Gemini inline data 上限附近（約 20MB 原始檔案，base64後略膨脹）
+      // 真正決定「這篇要不要真的讀內文」的總量控管，留給 compareClaimWithLiterature 依整批大小動態決定
+      if (base64.length > 27000000) {
+        log(`  ⚠️ ${file.name} 檔案過大（${(base64.length/1000000).toFixed(1)}MB，超過Gemini單檔上限），僅供標題參考`);
         results.push({ title: file.name, mimeType: null, base64: null });
       } else {
         log(`  ✓ ${file.name}｜類型：${mimeType}｜大小：${(base64.length/1000).toFixed(0)}KB`);
