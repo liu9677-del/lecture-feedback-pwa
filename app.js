@@ -86,12 +86,7 @@ async function submitToBackground(blob, mimeType, label) {
     const base64 = await blobToBase64(blob);
     log(`📤 ${label}｜開始上傳（音檔大小約 ${(base64.length / 1000).toFixed(0)}KB）`);
 
-    // 用 no-cors 模式「送出」：這個方向的請求本來就穩定，只是讀不到回應，改用no-cors不理會回應即可。
-    await fetch(CONFIG.APPS_SCRIPT_URL, {
-      method: 'POST',
-      mode: 'no-cors',
-      body: JSON.stringify({ audioBase64: base64, mimeType, label, jobId }),
-    });
+    await uploadInChunks(base64, mimeType, label, jobId, cardKey);
 
     updateCard(cardKey, `🔄 ${label}｜已送出，伺服器背景處理中，正在查詢進度...`);
     log(`📤 ${label}｜已送出，開始查詢處理進度（可安心離開此頁面，回來時進度會遺失但伺服器仍會繼續處理，請直接看Drive）`);
@@ -108,6 +103,47 @@ async function submitToBackground(blob, mimeType, label) {
       cardEl.querySelector('.report-body').appendChild(retry);
     }
   }
+}
+
+// ---------- 分片上傳：每片約 0.9MB，各自送出、各自重試，伺服器最後合併 ----------
+const CHUNK_SIZE = 900000;
+
+async function postNoCors(payload) {
+  // no-cors：讀不到回應，但請求成功送達時 fetch 會正常結束；網路失敗才會 reject
+  await fetch(CONFIG.APPS_SCRIPT_URL, {
+    method: 'POST',
+    mode: 'no-cors',
+    body: JSON.stringify(payload),
+  });
+}
+
+async function postWithRetry(payload, tries) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    try {
+      await postNoCors(payload);
+      return;
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+async function uploadInChunks(base64, mimeType, label, jobId, cardKey) {
+  const total = Math.ceil(base64.length / CHUNK_SIZE);
+  for (let i = 0; i < total; i++) {
+    updateCard(cardKey, `⏳ ${label}｜上傳中 ${i + 1}/${total}`);
+    const data = base64.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+    try {
+      await postWithRetry({ action: 'chunk', jobId, index: i, total, data }, 3);
+    } catch (err) {
+      throw new Error(`第 ${i + 1}/${total} 片上傳失敗（${err.message}）`);
+    }
+  }
+  log(`📤 ${label}｜全部 ${total} 片已送達，通知伺服器開始處理`);
+  await postWithRetry({ action: 'commit', jobId, total, mimeType, label }, 3);
 }
 
 // ---------- JSONP 輪詢：用 <script> 標籤查詢進度，完全不受 CORS 限制影響 ----------
