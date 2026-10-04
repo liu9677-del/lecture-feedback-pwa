@@ -39,7 +39,11 @@ recordBtn.addEventListener('click', async () => {
   }
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
   audioChunks = [];
-  mediaRecorder = new MediaRecorder(stream);
+  try {
+    mediaRecorder = new MediaRecorder(stream, { audioBitsPerSecond: 32000 });
+  } catch (e) {
+    mediaRecorder = new MediaRecorder(stream);
+  }
   mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
   mediaRecorder.onstop = () => {
     const blob = new Blob(audioChunks, { type: 'audio/webm' });
@@ -94,7 +98,15 @@ async function submitToBackground(blob, mimeType, label) {
     pollJobStatus(jobId, cardKey, label, 0);
   } catch (err) {
     log(`❌ ${label}｜上傳失敗：${err.message}`);
-    updateCard(cardKey, `❌ ${label}｜上傳失敗：${err.message}`);
+    updateCard(cardKey, `❌ ${label}｜上傳失敗：${err.message}`, '錄音仍保留在這個頁面，請不要重新整理或關閉。可按下方按鈕重試。');
+    const cardEl = document.getElementById(`report-${cardKey}`);
+    if (cardEl) {
+      const retry = document.createElement('button');
+      retry.textContent = '🔁 重試上傳';
+      retry.style.cssText = 'margin-top:10px;background:#2b5797;color:white;';
+      retry.onclick = () => { retry.disabled = true; submitToBackground(blob, mimeType, label); };
+      cardEl.querySelector('.report-body').appendChild(retry);
+    }
   }
 }
 
