@@ -74,6 +74,21 @@ clearBtn.addEventListener('click', () => {
 });
 
 // ---------- 上傳到 Apps Script，背景處理，不阻塞介面 ----------
+const failedJobs = new Set();
+
+function showUploadFailure(cardKey, label, err, blob, mimeType) {
+  log(`❌ ${label}｜上傳失敗：${err.message}`);
+  updateCard(cardKey, `❌ ${label}｜上傳失敗：${err.message}`, '錄音仍保留在這個頁面，請不要重新整理或關閉。可按下方按鈕重試。');
+  const cardEl = document.getElementById(`report-${cardKey}`);
+  if (cardEl) {
+    const retry = document.createElement('button');
+    retry.textContent = '🔁 重試上傳';
+    retry.style.cssText = 'margin-top:10px;background:#2b5797;color:white;';
+    retry.onclick = () => { retry.disabled = true; submitToBackground(blob, mimeType, label); };
+    cardEl.querySelector('.report-body').appendChild(retry);
+  }
+}
+
 async function submitToBackground(blob, mimeType, label) {
   jobCounter++;
   const cardKey = jobCounter;
@@ -86,69 +101,34 @@ async function submitToBackground(blob, mimeType, label) {
     const base64 = await blobToBase64(blob);
     log(`📤 ${label}｜開始上傳（音檔大小約 ${(base64.length / 1000).toFixed(0)}KB）`);
 
-    await uploadInChunks(base64, mimeType, label, jobId, cardKey);
+    // 關鍵：不等伺服器處理完。伺服器要處理 2～3 分鐘，Safari 會在中途斷線並回報
+    // 「Load failed」，但伺服器其實會繼續做完。所以送出後立刻開始查進度；
+    // 只有「送出後 20 秒內就失敗」才視為真的上傳失敗（例如沒網路）。
+    const sentAt = Date.now();
+    fetch(CONFIG.APPS_SCRIPT_URL, {
+      method: 'POST',
+      mode: 'no-cors',
+      body: JSON.stringify({ audioBase64: base64, mimeType, label, jobId }),
+    }).catch((err) => {
+      if (Date.now() - sentAt < 20000) {
+        failedJobs.add(jobId);
+        showUploadFailure(cardKey, label, err, blob, mimeType);
+      }
+      // 超過 20 秒才斷線：多半是 Safari 等待逾時，伺服器仍在處理，不當作失敗
+    });
 
-    updateCard(cardKey, `🔄 ${label}｜已送出，伺服器背景處理中，正在查詢進度...`);
-    log(`📤 ${label}｜已送出，開始查詢處理進度（可安心離開此頁面，回來時進度會遺失但伺服器仍會繼續處理，請直接看Drive）`);
+    updateCard(cardKey, `🔄 ${label}｜已送出，等待伺服器接手...`);
+    log(`📤 ${label}｜已送出，開始查詢處理進度（約 2～4 分鐘；上傳完成後可離開頁面，報告會存到 Drive）`);
     pollJobStatus(jobId, cardKey, label, 0);
   } catch (err) {
-    log(`❌ ${label}｜上傳失敗：${err.message}`);
-    updateCard(cardKey, `❌ ${label}｜上傳失敗：${err.message}`, '錄音仍保留在這個頁面，請不要重新整理或關閉。可按下方按鈕重試。');
-    const cardEl = document.getElementById(`report-${cardKey}`);
-    if (cardEl) {
-      const retry = document.createElement('button');
-      retry.textContent = '🔁 重試上傳';
-      retry.style.cssText = 'margin-top:10px;background:#2b5797;color:white;';
-      retry.onclick = () => { retry.disabled = true; submitToBackground(blob, mimeType, label); };
-      cardEl.querySelector('.report-body').appendChild(retry);
-    }
+    showUploadFailure(cardKey, label, err, blob, mimeType);
   }
-}
-
-// ---------- 分片上傳：每片約 0.9MB，各自送出、各自重試，伺服器最後合併 ----------
-const CHUNK_SIZE = 900000;
-
-async function postNoCors(payload) {
-  // no-cors：讀不到回應，但請求成功送達時 fetch 會正常結束；網路失敗才會 reject
-  await fetch(CONFIG.APPS_SCRIPT_URL, {
-    method: 'POST',
-    mode: 'no-cors',
-    body: JSON.stringify(payload),
-  });
-}
-
-async function postWithRetry(payload, tries) {
-  let lastErr;
-  for (let i = 0; i < tries; i++) {
-    try {
-      await postNoCors(payload);
-      return;
-    } catch (err) {
-      lastErr = err;
-      await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
-    }
-  }
-  throw lastErr;
-}
-
-async function uploadInChunks(base64, mimeType, label, jobId, cardKey) {
-  const total = Math.ceil(base64.length / CHUNK_SIZE);
-  for (let i = 0; i < total; i++) {
-    updateCard(cardKey, `⏳ ${label}｜上傳中 ${i + 1}/${total}`);
-    const data = base64.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-    try {
-      await postWithRetry({ action: 'chunk', jobId, index: i, total, data }, 3);
-    } catch (err) {
-      throw new Error(`第 ${i + 1}/${total} 片上傳失敗（${err.message}）`);
-    }
-  }
-  log(`📤 ${label}｜全部 ${total} 片已送達，通知伺服器開始處理`);
-  await postWithRetry({ action: 'commit', jobId, total, mimeType, label }, 3);
 }
 
 // ---------- JSONP 輪詢：用 <script> 標籤查詢進度，完全不受 CORS 限制影響 ----------
 function pollJobStatus(jobId, cardKey, label, attempt) {
-  const MAX_ATTEMPTS = 60; // 每8秒查一次，最多查約8分鐘
+  if (failedJobs.has(jobId)) return;
+  const MAX_ATTEMPTS = 75; // 每8秒查一次，最多查約10分鐘
   if (attempt >= MAX_ATTEMPTS) {
     updateCard(cardKey, `⚠️ ${label}｜查詢逾時`, `伺服器可能仍在處理，或查詢遇到問題。請直接至 Google Drive「演講評論報告」資料夾查看是否已產生報告。`);
     return;
@@ -164,6 +144,7 @@ function pollJobStatus(jobId, cardKey, label, attempt) {
 
   window[callbackName] = (data) => {
     cleanup();
+    if (failedJobs.has(jobId)) return;
     if (data.status === 'done') {
       log(`✅ ${label}｜背景處理完成！`);
       updateCard(cardKey, `✅ ${label}｜完成`, `報告已存到您的 Google Drive「演講評論報告」資料夾。`);
@@ -182,7 +163,10 @@ function pollJobStatus(jobId, cardKey, label, attempt) {
       updateCard(cardKey, `❌ ${label}｜處理失敗`, data.message || '未知錯誤');
     } else {
       // pending 或 processing，繼續等待後再查一次
-      updateCard(cardKey, `🔄 ${label}｜伺服器處理中...（已查詢 ${attempt + 1} 次）`);
+      const waiting = data.status === 'processing'
+        ? `🔄 ${label}｜伺服器處理中...（已 ${(attempt + 1) * 8} 秒）`
+        : `⏳ ${label}｜等待伺服器接手...（已 ${(attempt + 1) * 8} 秒；檔案大時上傳需要較久）`;
+      updateCard(cardKey, waiting);
       setTimeout(() => pollJobStatus(jobId, cardKey, label, attempt + 1), 8000);
     }
   };
